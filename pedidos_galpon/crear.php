@@ -4,6 +4,28 @@ require_once __DIR__ . '/../config/auth.php';
 
 $db = getDB();
 
+// ── API: items de un comprobante emitido (llamada AJAX desde el form) ─────────
+if (($_GET['api'] ?? '') === 'comp_items') {
+    $compId = (int)($_GET['comp_id'] ?? 0);
+    if ($compId > 0) {
+        $stApi = $db->prepare("
+            SELECT ci.producto_id, ci.nombre_producto, ci.cantidad_cajas, ci.cantidad_unidades,
+                   ci.costo_unitario, COALESCE(p.codigo, '') AS codigo
+            FROM comprobante_items ci
+            LEFT JOIN productos p ON p.id = ci.producto_id
+            WHERE ci.comprobante_id = ?
+            ORDER BY ci.id ASC
+        ");
+        $stApi->execute([$compId]);
+        header('Content-Type: application/json');
+        echo json_encode($stApi->fetchAll(PDO::FETCH_ASSOC));
+    } else {
+        header('Content-Type: application/json');
+        echo '[]';
+    }
+    exit;
+}
+
 // ── Modo edición ──────────────────────────────────────────────────────────────
 $editId   = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $editMode = $editId > 0;
@@ -46,6 +68,15 @@ $productos = $db->query("
     WHERE p.activo = 1
     ORDER BY p.nombre COLLATE utf8mb4_unicode_ci ASC
 ")->fetchAll(PDO::FETCH_ASSOC);
+
+// Comprobantes emitidos para importar
+$comprobantesEmitidos = $db->query("
+    SELECT c.id, c.numero, cl.nombre AS cliente
+    FROM comprobantes c
+    JOIN clientes cl ON cl.id = c.cliente_id
+    WHERE c.estado = 'emitido'
+    ORDER BY c.numero DESC
+")->fetchAll();
 
 $pageTitle     = $editMode ? 'Editar pedido #' . $editId : 'Nuevo pedido al proveedor';
 $topbarActions = $editMode
@@ -103,6 +134,35 @@ require_once __DIR__ . '/../config/layout.php';
                 </div>
             </div>
         </div>
+
+        <!-- Importar desde comprobante -->
+        <?php if (!empty($comprobantesEmitidos)): ?>
+        <div class="card" style="margin-top:16px;">
+            <div class="card-header"><span class="card-title">Importar desde comprobante</span></div>
+            <div class="card-body">
+                <div style="display:flex; gap:8px; align-items:flex-end;">
+                    <div class="form-group" style="flex:1; margin:0;">
+                        <label class="form-label">Comprobante emitido</label>
+                        <select id="sel-importar-comp" class="form-control">
+                            <option value="">— Seleccionar comprobante —</option>
+                            <?php foreach ($comprobantesEmitidos as $c): ?>
+                            <option value="<?= $c['id'] ?>">
+                                #<?= (int)$c['numero'] ?> — <?= e($c['cliente']) ?>
+                            </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <button type="button" class="btn btn-outline" onclick="importarDesdeComprobante()"
+                            style="white-space:nowrap; padding:8px 16px;">
+                        ↓ Importar productos
+                    </button>
+                </div>
+                <div class="text-muted" style="font-size:11px; margin-top:6px;">
+                    Agrega los productos del comprobante con sus cantidades y costos. Podés importar varios.
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
 
         <!-- Items -->
         <div class="card" style="margin-top:16px;">
@@ -406,6 +466,61 @@ function validarForm() {
 
 function escHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ── Importar desde comprobante ────────────────────────────────────────────────
+function importarDesdeComprobante() {
+    var sel = document.getElementById('sel-importar-comp');
+    if (!sel) return;
+    var compId = sel.value;
+    if (!compId) { alert('Seleccioná un comprobante.'); return; }
+
+    var btn = sel.parentNode.nextElementSibling;
+    btn.disabled = true;
+    btn.textContent = '…';
+
+    fetch('/attos/pedidos_galpon/crear.php?api=comp_items&comp_id=' + compId)
+        .then(function(r) { return r.json(); })
+        .then(function(items) {
+            btn.disabled = false;
+            btn.textContent = '↓ Importar productos';
+            if (!items.length) { alert('El comprobante no tiene productos.'); return; }
+
+            items.forEach(function(item) {
+                var prodId = item.producto_id ? parseInt(item.producto_id) : 0;
+                var cajas  = parseInt(item.cantidad_cajas)   || 0;
+                var unid   = parseInt(item.cantidad_unidades) || 0;
+                var costo  = parseFloat(item.costo_unitario)  || 0;
+
+                // Si el producto ya está en la tabla, suma las cajas
+                var existente = prodId
+                    ? document.querySelector('#items-body tr[data-prod-id="' + prodId + '"]')
+                    : null;
+
+                if (existente) {
+                    var cajasInput = existente.querySelector('.cajas-vis');
+                    cajasInput.value = (parseInt(cajasInput.value) || 0) + cajas;
+                    var unidInput = existente.querySelector('.unid-vis');
+                    unidInput.value = (parseInt(unidInput.value) || 0) + unid;
+                    sincronizar(parseInt(existente.dataset.idx));
+                } else {
+                    var p = prodId && PROD_MAP[prodId] ? PROD_MAP[prodId] : {
+                        id: prodId,
+                        codigo: item.codigo || '',
+                        nombre: item.nombre_producto,
+                        costo_unitario: costo
+                    };
+                    agregarFila(p, cajas, unid, costo);
+                }
+            });
+
+            sel.value = '';
+        })
+        .catch(function() {
+            btn.disabled = false;
+            btn.textContent = '↓ Importar productos';
+            alert('Error al cargar el comprobante.');
+        });
 }
 
 // ── Precargar modo edición ────────────────────────────────────────────────────

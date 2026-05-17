@@ -1,0 +1,4 @@
+-- ATTOS — Actualización v16
+-- Sin cambios de esquema requeridos.
+-- La funcionalidad de importar comprobantes en pedidos galpón
+-- es completamente client-side (API JSON + JS en crear.php).
